@@ -1,0 +1,13 @@
+{
+  "appId": "id.fairvalue.app",
+  "appName": "FairValue ID",
+  "webDir": "dist",
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">FairValue ID</string>
+    <string name="title_activity_main">FairValue ID</string>
+    <string name="package_name">id.fairvalue.app</string>
+    <string name="custom_url_scheme">id.fairvalue.app</string>
+</resources>
