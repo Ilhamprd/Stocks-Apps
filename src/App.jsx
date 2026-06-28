@@ -23,6 +23,21 @@ const setApiKey = (k) => {
 };
 
 /* ============================================================
+   PERSISTENCE — data edit & saham terakhir disimpan di HP
+   (localStorage) jadi nggak ilang pas app ditutup.
+   ============================================================ */
+const OVR_KEY = "fv:overrides", LAST_KEY = "fv:lastcode";
+const loadOverrides = () => { try { return JSON.parse(localStorage.getItem(OVR_KEY) || "{}"); } catch { return {}; } };
+const saveOverride = (code, raw) => {
+  try { const all = loadOverrides(); all[code] = raw; localStorage.setItem(OVR_KEY, JSON.stringify(all)); } catch {}
+};
+const clearOverride = (code) => {
+  try { const all = loadOverrides(); delete all[code]; localStorage.setItem(OVR_KEY, JSON.stringify(all)); } catch {}
+};
+const loadLastCode = () => { try { return localStorage.getItem(LAST_KEY) || ""; } catch { return ""; } };
+const saveLastCode = (code) => { try { localStorage.setItem(LAST_KEY, code); } catch {} };
+
+/* ============================================================
    THEME  — palette mengikuti brief (Apple / Linear / Stripe)
    ============================================================ */
 const T = {
@@ -140,6 +155,15 @@ function enrich(code) {
   return s;
 }
 const CODES = Object.keys(DEMO);
+
+// snapshot demo asli (buat tombol reset) + pulihkan data edit yang tersimpan
+const DEMO_ORIGINAL = JSON.parse(JSON.stringify(DEMO));
+(() => {
+  try {
+    const saved = loadOverrides();
+    Object.keys(saved).forEach((c) => { if (DEMO[c]) DEMO[c] = { ...DEMO[c], ...saved[c] }; });
+  } catch {}
+})();
 
 /* ============================================================
    VALUATION ENGINE — 10 model, real math
@@ -433,13 +457,14 @@ const TABS = [
 ];
 
 export default function App() {
-  const [code, setCode] = useState("BBRI");
+  const initCode = (() => { const c = loadLastCode(); return c && DEMO[c] ? c : "BBRI"; })();
+  const [code, setCode] = useState(initCode);
   const [tab, setTab] = useState("dashboard");
-  const [data, setData] = useState(enrich("BBRI"));
+  const [data, setData] = useState(enrich(initCode));
   const [q, setQ] = useState("");
 
   // load ticker → editable copy
-  const loadCode = (c) => { setCode(c); setData(enrich(c)); setQ(""); setPriceMsg(null); };
+  const loadCode = (c) => { setCode(c); setData(enrich(c)); setQ(""); setPriceMsg(null); saveLastCode(c); };
 
   // ---- LIVE PRICE (Yahoo Finance v8 chart endpoint, .JK ticker) ----
   const [priceLoading, setPriceLoading] = useState(false);
@@ -461,7 +486,9 @@ export default function App() {
       const closes = (r?.indicators?.quote?.[0]?.close || []).filter((x) => typeof x === "number" && x > 0);
       const patch = { price, prevClose };
       if (closes.length >= 6) patch.px = closes.slice(-12).map((x) => Math.round(x));
-      setData(enrichFrom(patch, code));
+      const enriched = enrichFrom(patch, code);
+      saveOverride(code, rawOf(enriched));
+      setData(enriched);
       const t = new Date();
       const hh = String(t.getHours()).padStart(2, "0"), mm = String(t.getMinutes()).padStart(2, "0");
       setPriceMsg({ type: "ok", text: `Harga live • diperbarui ${hh}:${mm}` });
@@ -573,7 +600,11 @@ function Dashboard({ A, data, setData, code }) {
   const { fv, upside, mos, investScore, rec } = A;
   const [edit, setEdit] = useState(false);
   const [editMode, setEditMode] = useState("stockbit"); // "stockbit" (rasio) | "raw"
-  const set = (k, v) => setData((d) => enrichFrom({ ...rawOf(d), [k]: parseFloat(v) || 0 }, d.code));
+  const set = (k, v) => setData((d) => {
+    const enriched = enrichFrom({ ...rawOf(d), [k]: parseFloat(v) || 0 }, d.code);
+    saveOverride(d.code, rawOf(enriched));
+    return enriched;
+  });
   // MODE STOCKBIT: ketik rasio → hitung balik fundamental pakai harga saat ini.
   // EPS/BVPS/DPS jadi price-independent, jadi pas harga di-update tetap konsisten.
   const setRatio = (kind, v) => setData((d) => {
@@ -584,8 +615,16 @@ function Dashboard({ A, data, setData, code }) {
     else if (kind === "epsGrowth") raw.epsGrowth = val;
     else if (kind === "avgPER") raw.manualAvgPER = val;
     else if (kind === "avgPBV") raw.manualAvgPBV = val;
-    return enrichFrom(raw, d.code);
+    const enriched = enrichFrom(raw, d.code);
+    saveOverride(d.code, rawOf(enriched));
+    return enriched;
   });
+  // reset saham ini ke angka demo asli (hapus data tersimpan)
+  const resetTicker = () => {
+    clearOverride(code);
+    DEMO[code] = JSON.parse(JSON.stringify(DEMO_ORIGINAL[code]));
+    setData(enrich(code));
+  };
   return (
     <>
       {/* hero score */}
@@ -627,14 +666,21 @@ function Dashboard({ A, data, setData, code }) {
 
         {edit && (
           <div style={{ marginTop: 16, padding: 16, background: T.primarySoft, borderRadius: 14 }}>
-            {/* toggle mode */}
-            <div style={{ display: "flex", gap: 6, marginBottom: 12, background: "#fff", padding: 4, borderRadius: 10, width: "fit-content" }}>
-              {[["stockbit", "📲 Dari Stockbit (rasio)"], ["raw", "🔧 Manual (EPS/BVPS)"]].map(([m, lbl]) => (
-                <button key={m} onClick={() => setEditMode(m)}
-                  style={{ border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer",
-                    background: editMode === m ? T.primary : "transparent", color: editMode === m ? "#fff" : T.sub }}>{lbl}</button>
-              ))}
+            {/* toggle mode + reset */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 6, background: "#fff", padding: 4, borderRadius: 10, width: "fit-content" }}>
+                {[["stockbit", "📲 Dari Stockbit (rasio)"], ["raw", "🔧 Manual (EPS/BVPS)"]].map(([m, lbl]) => (
+                  <button key={m} onClick={() => setEditMode(m)}
+                    style={{ border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                      background: editMode === m ? T.primary : "transparent", color: editMode === m ? "#fff" : T.sub }}>{lbl}</button>
+                ))}
+              </div>
+              <button onClick={resetTicker}
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, border: `1px solid ${T.border}`, background: "#fff", color: T.danger, borderRadius: 9, padding: "7px 11px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                <Trash2 size={13} /> Reset ke demo
+              </button>
             </div>
+            <div style={{ fontSize: 11.5, color: T.success, fontWeight: 700, marginBottom: 10 }}>✓ Perubahan tersimpan otomatis di HP — nggak ilang pas app ditutup.</div>
 
             {editMode === "stockbit" ? (
               <>
