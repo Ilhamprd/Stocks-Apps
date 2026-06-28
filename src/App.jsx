@@ -543,26 +543,38 @@ export default function App() {
   // ---- UNIVERSAL SEARCH: tambah saham IDX apa aja (validasi + harga via Yahoo) ----
   const [searching, setSearching] = useState(false);
   const [ver, setVer] = useState(0);
+
+  // daftarkan saham ke universe (DEMO) TANPA mengubah saham aktif.
+  // Dipakai search utama & form Portfolio. Validasi + harga live via Yahoo.
+  // Return kode ter-normalisasi; throw kalau ticker tak ketemu.
+  const registerStock = async (rawCode) => {
+    const c = (rawCode || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!c) throw new Error("kode kosong");
+    if (DEMO[c]) return c;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${c}.JK?range=1y&interval=1mo`;
+    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+    const json = await res.json();
+    const r = json?.chart?.result?.[0];
+    const meta = r?.meta;
+    if (!meta || typeof meta.regularMarketPrice !== "number") throw new Error(`"${c}" nggak ketemu di IDX (cek kodenya)`);
+    const price = Math.round(meta.regularMarketPrice);
+    const prevClose = Math.round(meta.previousClose || meta.chartPreviousClose || price);
+    const closes = (r?.indicators?.quote?.[0]?.close || []).filter((x) => typeof x === "number" && x > 0).map((x) => Math.round(x));
+    DEMO[c] = makeStock(c);
+    DEMO[c].price = price; DEMO[c].prevClose = prevClose;
+    DEMO[c].px = closes.length >= 2 ? closes.slice(-12) : [price, price];
+    saveOverride(c, rawOf(enrich(c)));
+    setVer((v) => v + 1);
+    return c;
+  };
+
   const addStock = async (rawCode) => {
     const c = (rawCode || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
     if (!c) return;
     if (DEMO[c]) { loadCode(c); return; }
     setSearching(true); setPriceMsg(null);
     try {
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${c}.JK?range=1y&interval=1mo`;
-      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
-      const json = await res.json();
-      const r = json?.chart?.result?.[0];
-      const meta = r?.meta;
-      if (!meta || typeof meta.regularMarketPrice !== "number") throw new Error(`"${c}" nggak ketemu di IDX (cek kodenya)`);
-      const price = Math.round(meta.regularMarketPrice);
-      const prevClose = Math.round(meta.previousClose || meta.chartPreviousClose || price);
-      const closes = (r?.indicators?.quote?.[0]?.close || []).filter((x) => typeof x === "number" && x > 0).map((x) => Math.round(x));
-      DEMO[c] = makeStock(c);
-      DEMO[c].price = price; DEMO[c].prevClose = prevClose;
-      DEMO[c].px = closes.length >= 2 ? closes.slice(-12) : [price, price];
-      saveOverride(c, rawOf(enrich(c)));
-      setVer((v) => v + 1);
+      await registerStock(c);
       setCode(c); setData(enrich(c)); setQ(""); saveLastCode(c);
       setPriceMsg({ type: "ok", text: `${c} ditambah ✓ harga live masuk — sekarang isi fundamental (PER/PBV/dll) dari Stockbit di "Edit data"` });
     } catch (e) {
@@ -663,7 +675,7 @@ export default function App() {
         {tab === "ai" && <AIAnalyst A={A} />}
         {tab === "screener" && <Screener list={allAnalyses} onPick={loadCode} />}
         {tab === "watchlist" && <Watchlist A={A} list={allAnalyses} onPick={loadCode} />}
-        {tab === "portfolio" && <Portfolio list={allAnalyses} />}
+        {tab === "portfolio" && <Portfolio list={allAnalyses} onRegister={registerStock} />}
         {tab === "risk" && <Risk A={A} />}
         {tab === "news" && <News s={data} A={A} />}
         {tab === "settings" && <SettingsTab />}
@@ -1192,26 +1204,47 @@ const Row = ({ k, v, c }) => (
 /* ============================================================
    TAB: PORTFOLIO  (persistent)
    ============================================================ */
-function Portfolio({ list }) {
+function Portfolio({ list, onRegister }) {
   const [pf, setPf] = useState([]);
   const [ready, setReady] = useState(false);
-  const [form, setForm] = useState({ code: "BBRI", shares: "", avg: "" });
+  const [query, setQuery] = useState("");
+  const [shares, setShares] = useState("");
+  const [avg, setAvg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null); // { type:'ok'|'err', text }
   const KEY = "fv:portfolio";
   const byCode = useMemo(() => Object.fromEntries(list.map((a) => [a.s.code, a])), [list]);
+  const codes = useMemo(() => list.map((a) => a.s.code), [list]);
 
   useEffect(() => { (async () => {
     try { const r = await window.storage.get(KEY); setPf(r ? JSON.parse(r.value) : []); } catch { setPf([]); } setReady(true);
   })(); }, []);
   const save = async (n) => { setPf(n); try { await window.storage.set(KEY, JSON.stringify(n)); } catch {} };
-  const add = () => {
-    const sh = parseFloat(form.shares), av = parseFloat(form.avg);
-    if (!sh || !av) return;
-    save([...pf.filter((h) => h.code !== form.code), { code: form.code, shares: sh, avg: av }]);
-    setForm({ code: "BBRI", shares: "", avg: "" });
+
+  // saran kode yang sudah ada di universe (demo + custom) sambil ngetik
+  const matches = query
+    ? codes.filter((c) => c.includes(query.toUpperCase()) || (byCode[c]?.s.name || "").toLowerCase().includes(query.toLowerCase()))
+    : [];
+
+  const add = async () => {
+    const sh = parseFloat(shares), av = parseFloat(avg);
+    const raw = (query || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!raw) { setMsg({ type: "err", text: "Isi kode saham dulu (mis. ASPR, GOTO, ANTM)." }); return; }
+    if (!sh || !av) { setMsg({ type: "err", text: "Isi jumlah lembar & harga avg." }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const c = await onRegister(raw); // validasi + harga live kalau saham baru
+      save([...pf.filter((h) => h.code !== c), { code: c, shares: sh, avg: av }]);
+      setQuery(""); setShares(""); setAvg("");
+      setMsg({ type: "ok", text: `${c} ditambahkan ke portfolio ✓` });
+    } catch (e) {
+      setMsg({ type: "err", text: "Gagal: " + (e.message || String(e)) });
+    }
+    setBusy(false);
   };
   const remove = (c) => save(pf.filter((h) => h.code !== c));
 
-  const rows = pf.map((h) => {
+  const rows = pf.filter((h) => byCode[h.code]).map((h) => {
     const a = byCode[h.code]; const cur = a.s.price;
     const cost = h.shares * h.avg, val = h.shares * cur, pl = val - cost;
     return { ...h, name: a.s.name, sector: a.s.sector, cur, intrinsic: a.fv, cost, val, pl, plPct: (pl / cost) * 100, rec: a.rec, mos: a.mos };
@@ -1229,16 +1262,37 @@ function Portfolio({ list }) {
   return (
     <>
       <Section title="Tambah Holding" icon={<Briefcase size={16} color={T.primary} />}>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <label style={{ fontSize: 12, fontWeight: 600 }}>Saham
-            <select value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} style={{ display: "block", marginTop: 4, padding: "8px 12px", borderRadius: 10, border: `1px solid ${T.border}`, background: "#fff", fontSize: 13 }}>
-              {CODES.map((c) => <option key={c}>{c}</option>)}</select></label>
-          <label style={{ fontSize: 12, fontWeight: 600 }}>Lembar
-            <input type="number" value={form.shares} onChange={(e) => setForm({ ...form, shares: e.target.value })} placeholder="1000" style={{ display: "block", marginTop: 4, padding: "8px 12px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 13, width: 120 }} /></label>
-          <label style={{ fontSize: 12, fontWeight: 600 }}>Harga avg
-            <input type="number" value={form.avg} onChange={(e) => setForm({ ...form, avg: e.target.value })} placeholder="4000" style={{ display: "block", marginTop: 4, padding: "8px 12px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 13, width: 120 }} /></label>
-          <button onClick={add} style={{ border: "none", background: T.primary, color: "#fff", borderRadius: 10, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Simpan</button>
+        <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 10, lineHeight: 1.5 }}>
+          Ketik kode saham IDX apa aja (mis. <b style={{ color: T.text }}>ASPR, GOTO, ANTM</b>) — nggak terbatas 6 saham demo. Kalau saham belum ada, app validasi & tarik harga live otomatis.
         </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <label style={{ fontSize: 12, fontWeight: 600, position: "relative", flex: 1, minWidth: 190 }}>Saham
+            <div style={{ position: "relative", marginTop: 4 }}>
+              <Search size={15} style={{ position: "absolute", left: 10, top: 10, color: T.sub }} />
+              <input value={query}
+                onChange={(e) => { setQuery(e.target.value.toUpperCase()); setMsg(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+                placeholder="Cari kode (ASPR, GOTO, ANTM…)"
+                autoCapitalize="characters" autoCorrect="off" spellCheck={false}
+                style={{ width: "100%", padding: "8px 10px 8px 32px", borderRadius: 10, border: `1px solid ${T.border}`, background: "#fff", fontSize: 13, outline: "none", color: T.text, boxSizing: "border-box" }} />
+            </div>
+            {query.trim().length > 0 && matches.length > 0 && (
+              <div style={{ position: "absolute", top: 62, left: 0, right: 0, background: "#fff", borderRadius: 10, border: `1px solid ${T.border}`, boxShadow: T.shadow, overflow: "hidden", zIndex: 30, maxHeight: 210, overflowY: "auto" }}>
+                {matches.map((c) => (
+                  <div key={c} onClick={() => setQuery(c)} style={{ padding: "9px 12px", cursor: "pointer", display: "flex", justifyContent: "space-between", gap: 8 }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = T.primarySoft)} onMouseLeave={(e) => (e.currentTarget.style.background = "#fff")}>
+                    <b style={{ color: T.primary, fontSize: 13 }}>{c}</b><span style={{ color: T.sub, fontSize: 12, textAlign: "right" }}>{byCode[c]?.s.name}{byCode[c]?.s.custom ? " · custom" : ""}</span>
+                  </div>))}
+              </div>)}
+          </label>
+          <label style={{ fontSize: 12, fontWeight: 600 }}>Lembar
+            <input type="number" value={shares} onChange={(e) => setShares(e.target.value)} placeholder="1000" style={{ display: "block", marginTop: 4, padding: "8px 12px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 13, width: 120 }} /></label>
+          <label style={{ fontSize: 12, fontWeight: 600 }}>Harga avg
+            <input type="number" value={avg} onChange={(e) => setAvg(e.target.value)} placeholder="4000" style={{ display: "block", marginTop: 4, padding: "8px 12px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 13, width: 120 }} /></label>
+          <button onClick={add} disabled={busy} style={{ border: "none", background: T.primary, color: "#fff", borderRadius: 10, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer", opacity: busy ? 0.7 : 1, display: "inline-flex", alignItems: "center", gap: 6 }}>
+            {busy && <RefreshCw size={14} className="spin" />}{busy ? "Memvalidasi…" : "Simpan"}</button>
+        </div>
+        {msg && <div style={{ marginTop: 10, fontSize: 12.5, fontWeight: 700, color: msg.type === "ok" ? T.success : T.danger }}>{msg.type === "ok" ? "● " : "⚠ "}{msg.text}</div>}
       </Section>
 
       {ready && rows.length > 0 && (
