@@ -26,3 +26,7 @@ body {
   background: #cbd5e1;
   border-radius: 3px;
 }
+
+/* spinner global (dipakai tombol Update harga & AI Analyst) */
+.spin { animation: sp 1s linear infinite; }
+@keyframes sp { to { transform: rotate(360deg); } }

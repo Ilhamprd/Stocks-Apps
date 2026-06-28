@@ -439,7 +439,38 @@ export default function App() {
   const [q, setQ] = useState("");
 
   // load ticker → editable copy
-  const loadCode = (c) => { setCode(c); setData(enrich(c)); setQ(""); };
+  const loadCode = (c) => { setCode(c); setData(enrich(c)); setQ(""); setPriceMsg(null); };
+
+  // ---- LIVE PRICE (Yahoo Finance v8 chart endpoint, .JK ticker) ----
+  const [priceLoading, setPriceLoading] = useState(false);
+  const [priceMsg, setPriceMsg] = useState(null); // { type:'ok'|'err', text }
+  const updateLivePrice = async () => {
+    setPriceLoading(true); setPriceMsg(null);
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${code}.JK?range=1y&interval=1mo`;
+      // User-Agent dihormati oleh CapacitorHttp (native) — di browser di-skip, aman.
+      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const json = await res.json();
+      const r = json?.chart?.result?.[0];
+      const meta = r?.meta;
+      if (!meta || typeof meta.regularMarketPrice !== "number") {
+        throw new Error(json?.chart?.error?.description || "ticker nggak ketemu di Yahoo (cek kodenya)");
+      }
+      const price = Math.round(meta.regularMarketPrice);
+      const prevClose = Math.round(meta.previousClose || meta.chartPreviousClose || price);
+      const closes = (r?.indicators?.quote?.[0]?.close || []).filter((x) => typeof x === "number" && x > 0);
+      const patch = { price, prevClose };
+      if (closes.length >= 6) patch.px = closes.slice(-12).map((x) => Math.round(x));
+      setData(enrichFrom(patch, code));
+      const t = new Date();
+      const hh = String(t.getHours()).padStart(2, "0"), mm = String(t.getMinutes()).padStart(2, "0");
+      setPriceMsg({ type: "ok", text: `Harga live • diperbarui ${hh}:${mm}` });
+    } catch (e) {
+      setPriceMsg({ type: "err", text: "Gagal ambil harga: " + (e.message || String(e)) });
+    }
+    setPriceLoading(false);
+  };
+
   const A = useMemo(() => analyze(data), [data]);
   const allAnalyses = useMemo(() => CODES.map((c) => analyze(enrich(c))), []);
 
@@ -493,7 +524,23 @@ export default function App() {
           <span style={{ color: data.price >= data.prevClose ? T.success : T.danger, fontWeight: 600 }}>
             {pct(((data.price - data.prevClose) / data.prevClose) * 100, 2)}
           </span>
-          <span style={{ marginLeft: "auto" }}><Pill color="#92400E" soft="#FEF3C7">⚠ Data demo — edit sebelum dipakai</Pill></span>
+          <button onClick={updateLivePrice} disabled={priceLoading}
+            style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, border: `1px solid ${T.border}`, background: "#fff", color: T.primary, borderRadius: 10, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: priceLoading ? "default" : "pointer", opacity: priceLoading ? 0.6 : 1 }}>
+            <RefreshCw size={14} className={priceLoading ? "spin" : undefined} />
+            {priceLoading ? "Mengambil…" : "Update harga"}
+          </button>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 7, flexWrap: "wrap" }}>
+          {priceMsg && (
+            <span style={{ fontSize: 12.5, fontWeight: 700, color: priceMsg.type === "ok" ? T.success : T.danger }}>
+              {priceMsg.type === "ok" ? "● " : "⚠ "}{priceMsg.text}
+            </span>
+          )}
+          <span style={{ fontSize: 12, color: T.sub }}>
+            {priceMsg?.type === "ok"
+              ? "Sumber: Yahoo Finance · fundamental (EPS, dll) masih demo — edit di bawah"
+              : "⚠ Angka demo — tap \"Update harga\" buat harga live, atau edit manual di bawah"}
+          </span>
         </div>
       </div>
 
