@@ -126,8 +126,8 @@ const DEMO = {
 function enrich(code) {
   const s = { code, ...DEMO[code] };
   const perHist = s.per, pbvHist = s.pbv;          // historical arrays
-  s.avgHistPER = median(perHist.filter((x) => x > 0));
-  s.avgHistPBV = median(pbvHist.filter((x) => x > 0));
+  s.avgHistPER = isFinite(s.manualAvgPER) && s.manualAvgPER > 0 ? s.manualAvgPER : median(perHist.filter((x) => x > 0));
+  s.avgHistPBV = isFinite(s.manualAvgPBV) && s.manualAvgPBV > 0 ? s.manualAvgPBV : median(pbvHist.filter((x) => x > 0));
   s.perHist = perHist; s.pbvHist = pbvHist;
   s.marketCap = s.price * s.shares;
   s.per = s.epsTTM > 0 ? s.price / s.epsTTM : NaN; // current scalar (overwrites array)
@@ -572,7 +572,20 @@ export default function App() {
 function Dashboard({ A, data, setData, code }) {
   const { fv, upside, mos, investScore, rec } = A;
   const [edit, setEdit] = useState(false);
+  const [editMode, setEditMode] = useState("stockbit"); // "stockbit" (rasio) | "raw"
   const set = (k, v) => setData((d) => enrichFrom({ ...rawOf(d), [k]: parseFloat(v) || 0 }, d.code));
+  // MODE STOCKBIT: ketik rasio → hitung balik fundamental pakai harga saat ini.
+  // EPS/BVPS/DPS jadi price-independent, jadi pas harga di-update tetap konsisten.
+  const setRatio = (kind, v) => setData((d) => {
+    const raw = rawOf(d); const val = parseFloat(v) || 0; const p = raw.price || 0;
+    if (kind === "per") { if (p > 0 && val > 0) raw.epsTTM = +(p / val).toFixed(2); }
+    else if (kind === "pbv") { if (p > 0 && val > 0) raw.bvps = +(p / val).toFixed(2); }
+    else if (kind === "divYield") { raw.dps = +((val / 100) * p).toFixed(2); }
+    else if (kind === "epsGrowth") raw.epsGrowth = val;
+    else if (kind === "avgPER") raw.manualAvgPER = val;
+    else if (kind === "avgPBV") raw.manualAvgPBV = val;
+    return enrichFrom(raw, d.code);
+  });
   return (
     <>
       {/* hero score */}
@@ -614,16 +627,55 @@ function Dashboard({ A, data, setData, code }) {
 
         {edit && (
           <div style={{ marginTop: 16, padding: 16, background: T.primarySoft, borderRadius: 14 }}>
-            <div style={{ fontSize: 12, color: T.sub, marginBottom: 10 }}>Ganti angka demo dengan data live (dari Stockbit/RTI/laporan keuangan). Fair value langsung dihitung ulang.</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10 }}>
-              {[["price", "Harga"], ["epsTTM", "EPS TTM"], ["bvps", "BVPS"], ["epsGrowth", "EPS Growth %"],
-                ["roe", "ROE %"], ["der", "DER"], ["dps", "DPS"], ["fcf", "FCF (Rp)"], ["beta", "Beta"],
-                ["sectorPER", "PER Sektor"], ["payout", "Payout %"], ["npm", "NPM %"]].map(([k, lbl]) => (
-                <label key={k} style={{ fontSize: 12, fontWeight: 600, color: T.text }}>{lbl}
-                  <input type="number" defaultValue={rawOf(data)[k]} onBlur={(e) => set(k, e.target.value)}
-                    style={{ width: "100%", marginTop: 4, padding: "7px 10px", borderRadius: 10, border: `1px solid ${T.border}`, background: "#fff", fontSize: 13 }} />
-                </label>))}
+            {/* toggle mode */}
+            <div style={{ display: "flex", gap: 6, marginBottom: 12, background: "#fff", padding: 4, borderRadius: 10, width: "fit-content" }}>
+              {[["stockbit", "📲 Dari Stockbit (rasio)"], ["raw", "🔧 Manual (EPS/BVPS)"]].map(([m, lbl]) => (
+                <button key={m} onClick={() => setEditMode(m)}
+                  style={{ border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+                    background: editMode === m ? T.primary : "transparent", color: editMode === m ? "#fff" : T.sub }}>{lbl}</button>
+              ))}
             </div>
+
+            {editMode === "stockbit" ? (
+              <>
+                <div style={{ fontSize: 12.5, color: T.text, marginBottom: 4, fontWeight: 600 }}>
+                  Tap <b>"Update harga"</b> dulu (di atas), baru ketik rasio yang kamu lihat di Stockbit. App hitung balik EPS/BVPS otomatis.
+                </div>
+                <div style={{ fontSize: 11.5, color: T.sub, marginBottom: 12 }}>
+                  PEG dihitung otomatis dari PER ÷ Growth. "PER/PBV Wajar" = rata-rata historis (lihat grafik PER Stockbit) untuk model Historical PER/PBV.
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10 }}>
+                  {[
+                    ["per", "PER sekarang (×)", isFinite(data.per) ? +data.per.toFixed(2) : ""],
+                    ["pbv", "PBV sekarang (×)", isFinite(data.pbv) ? +data.pbv.toFixed(2) : ""],
+                    ["divYield", "Dividend Yield (%)", +data.divYield.toFixed(2)],
+                    ["epsGrowth", "EPS Growth (%)", rawOf(data).epsGrowth],
+                    ["avgPER", "PER Wajar / historis (×)", +data.avgHistPER.toFixed(2)],
+                    ["avgPBV", "PBV Wajar / historis (×)", +data.avgHistPBV.toFixed(2)],
+                  ].map(([k, lbl, dv]) => (
+                    <label key={k} style={{ fontSize: 12, fontWeight: 600, color: T.text }}>{lbl}
+                      <input type="number" step="0.01" defaultValue={dv} onBlur={(e) => setRatio(k, e.target.value)}
+                        style={{ width: "100%", marginTop: 4, padding: "7px 10px", borderRadius: 10, border: `1px solid ${T.border}`, background: "#fff", fontSize: 13 }} />
+                    </label>))}
+                </div>
+                <div style={{ marginTop: 12, padding: "10px 12px", background: "#fff", borderRadius: 10, fontSize: 12, color: T.sub }}>
+                  Hasil hitung balik → <b style={{ color: T.text }}>EPS {rp(data.epsTTM)}</b> · <b style={{ color: T.text }}>BVPS {rp(data.bvps)}</b> · <b style={{ color: T.text }}>DPS {rp(data.dps)}</b>. Catatan: <b>DCF</b> butuh FCF — set di tab Manual kalau perlu.
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 12, color: T.sub, marginBottom: 10 }}>Input fundamental langsung (price-independent). Stockbit juga menampilkan EPS, BVPS, DPS di Key Stats.</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10 }}>
+                  {[["price", "Harga"], ["epsTTM", "EPS TTM"], ["bvps", "BVPS"], ["epsGrowth", "EPS Growth %"],
+                    ["roe", "ROE %"], ["der", "DER"], ["dps", "DPS"], ["fcf", "FCF (Rp)"], ["beta", "Beta"],
+                    ["sectorPER", "PER Sektor"], ["payout", "Payout %"], ["npm", "NPM %"]].map(([k, lbl]) => (
+                    <label key={k} style={{ fontSize: 12, fontWeight: 600, color: T.text }}>{lbl}
+                      <input type="number" defaultValue={rawOf(data)[k]} onBlur={(e) => set(k, e.target.value)}
+                        style={{ width: "100%", marginTop: 4, padding: "7px 10px", borderRadius: 10, border: `1px solid ${T.border}`, background: "#fff", fontSize: 13 }} />
+                    </label>))}
+                </div>
+              </>
+            )}
           </div>)}
       </Section>
 
