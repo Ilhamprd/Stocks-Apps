@@ -156,12 +156,25 @@ function enrich(code) {
 }
 const CODES = Object.keys(DEMO);
 
-// snapshot demo asli (buat tombol reset) + pulihkan data edit yang tersimpan
+// factory saham baru (di luar 6 demo) — fundamental kosong, diisi user dari Stockbit
+function makeStock(code, name = code, sector = "—") {
+  return {
+    name, sector, price: 0, prevClose: 0, open: 0, high: 0, low: 0,
+    volume: 0, shares: 0, epsTTM: 0, bvps: 0, roe: 0, roa: 0, der: 0, debtRatio: 0,
+    currentRatio: 0, npm: 0, gpm: 0, opm: 0, revGrowth: 0, niGrowth: 0, epsGrowth: 0, fcf: 0, ocf: 0,
+    dps: 0, payout: 0, beta: 1, sectorPER: 12, evEbitda: 0, custom: true,
+    eps: [], rev: [], ni: [], per: [], pbv: [], dpsH: [], fcfH: [], px: [0, 0],
+  };
+}
+
+// snapshot demo asli (buat tombol reset) + pulihkan data edit & saham custom yang tersimpan
 const DEMO_ORIGINAL = JSON.parse(JSON.stringify(DEMO));
 (() => {
   try {
     const saved = loadOverrides();
-    Object.keys(saved).forEach((c) => { if (DEMO[c]) DEMO[c] = { ...DEMO[c], ...saved[c] }; });
+    Object.keys(saved).forEach((c) => {
+      DEMO[c] = DEMO[c] ? { ...DEMO[c], ...saved[c] } : { ...makeStock(c), ...saved[c] };
+    });
   } catch {}
 })();
 
@@ -318,6 +331,33 @@ function recommendation(score, upside) {
   if (score >= 50 && upside >= -8) return { label: "HOLD", stars: 3, color: T.warning, soft: T.warningSoft };
   if (upside <= -15 || score < 40) return { label: "SELL", stars: 1, color: T.danger, soft: T.dangerSoft };
   return { label: "REDUCE", stars: 2, color: "#F97316", soft: "#FFF7ED" };
+}
+
+// Aksi posisi: butuh harga beli utk bedain CUT LOSS vs TAKE PROFIT.
+// plPct = % untung/rugi vs harga beli (null kalau harga beli belum diisi).
+function positionAction(upside, score, plPct) {
+  if (!isFinite(upside)) return { label: "LENGKAPI DATA", color: T.sub, soft: T.bg, note: "Isi fundamental (PER/PBV/dll) dari Stockbit dulu untuk dapat saran aksi." };
+  const over = upside <= -8, severe = upside <= -20 || score < 35, under = upside >= 8;
+  const O = "#F97316", OS = "#FFF7ED";
+  if (plPct === null || !isFinite(plPct)) {
+    if (severe) return { label: "JUAL / HINDARI", color: T.danger, soft: T.dangerSoft, note: "Harga jauh di atas nilai wajar atau kualitas lemah." };
+    if (over) return { label: "KURANGI", color: O, soft: OS, note: "Sedikit di atas nilai wajar." };
+    if (under) return { label: "AKUMULASI", color: T.success, soft: T.successSoft, note: "Masih di bawah nilai wajar." };
+    return { label: "TAHAN", color: T.warning, soft: T.warningSoft, note: "Harga dekat nilai wajar. Isi harga beli utk saran cut loss / take profit." };
+  }
+  const loss = plPct < 0, pl = (plPct >= 0 ? "+" : "") + plPct.toFixed(1) + "%";
+  if (severe) {
+    return loss
+      ? { label: "CUT LOSS", color: T.danger, soft: T.dangerSoft, note: `Kamu ${pl} & harga jauh di atas nilai wajar → batasi kerugian, jangan "average down" cuma demi balik modal.` }
+      : { label: "TAKE PROFIT", color: T.success, soft: T.successSoft, note: `Kamu ${pl} & sudah jauh di atas nilai wajar → pertimbangkan realisasi untung.` };
+  }
+  if (over) return loss
+    ? { label: "KURANGI / WASPADA", color: O, soft: OS, note: `Kamu ${pl}, harga sedikit di atas wajar. Pertimbangkan kurangi posisi & pasang batas risiko.` }
+    : { label: "TAKE PROFIT SEBAGIAN", color: T.success, soft: T.successSoft, note: `Kamu ${pl}, harga di atas wajar. Bisa ambil sebagian.` };
+  if (under) return loss
+    ? { label: "TAHAN (hati-hati)", color: T.primary, soft: T.primarySoft, note: `Kamu ${pl} tapi harga masih di bawah nilai wajar. Kalau fundamental kuat, koreksi bisa jadi peluang — tetap pasang batas risiko.` }
+    : { label: "HOLD / TAMBAH", color: T.success, soft: T.successSoft, note: `Kamu ${pl} & masih di bawah nilai wajar.` };
+  return { label: "TAHAN", color: T.warning, soft: T.warningSoft, note: `Kamu ${pl}, harga mendekati nilai wajar. Pantau fundamental.` };
 }
 
 function analyze(s) {
@@ -499,10 +539,42 @@ export default function App() {
   };
 
   const A = useMemo(() => analyze(data), [data]);
-  const allAnalyses = useMemo(() => CODES.map((c) => analyze(enrich(c))), []);
+
+  // ---- UNIVERSAL SEARCH: tambah saham IDX apa aja (validasi + harga via Yahoo) ----
+  const [searching, setSearching] = useState(false);
+  const [ver, setVer] = useState(0);
+  const addStock = async (rawCode) => {
+    const c = (rawCode || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!c) return;
+    if (DEMO[c]) { loadCode(c); return; }
+    setSearching(true); setPriceMsg(null);
+    try {
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${c}.JK?range=1y&interval=1mo`;
+      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
+      const json = await res.json();
+      const r = json?.chart?.result?.[0];
+      const meta = r?.meta;
+      if (!meta || typeof meta.regularMarketPrice !== "number") throw new Error(`"${c}" nggak ketemu di IDX (cek kodenya)`);
+      const price = Math.round(meta.regularMarketPrice);
+      const prevClose = Math.round(meta.previousClose || meta.chartPreviousClose || price);
+      const closes = (r?.indicators?.quote?.[0]?.close || []).filter((x) => typeof x === "number" && x > 0).map((x) => Math.round(x));
+      DEMO[c] = makeStock(c);
+      DEMO[c].price = price; DEMO[c].prevClose = prevClose;
+      DEMO[c].px = closes.length >= 2 ? closes.slice(-12) : [price, price];
+      saveOverride(c, rawOf(enrich(c)));
+      setVer((v) => v + 1);
+      setCode(c); setData(enrich(c)); setQ(""); saveLastCode(c);
+      setPriceMsg({ type: "ok", text: `${c} ditambah ✓ harga live masuk — sekarang isi fundamental (PER/PBV/dll) dari Stockbit di "Edit data"` });
+    } catch (e) {
+      setPriceMsg({ type: "err", text: "Gagal: " + (e.message || String(e)) });
+    }
+    setSearching(false);
+  };
+
+  const allAnalyses = useMemo(() => Object.keys(DEMO).map((c) => analyze(enrich(c))), [ver]);
 
   const matches = q
-    ? CODES.filter((c) => c.includes(q.toUpperCase()) || DEMO[c].name.toLowerCase().includes(q.toLowerCase()))
+    ? Object.keys(DEMO).filter((c) => c.includes(q.toUpperCase()) || (DEMO[c].name || "").toLowerCase().includes(q.toLowerCase()))
     : [];
 
   return (
@@ -517,15 +589,27 @@ export default function App() {
           </div>
           <div style={{ position: "relative", flex: 1, minWidth: 220, maxWidth: 380 }}>
             <Search size={16} style={{ position: "absolute", left: 12, top: 11, color: T.sub }} />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Cari kode / nama (BBRI, ADRO…)"
+            <input value={q} onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && q.trim()) { matches[0] && matches[0] === q.trim().toUpperCase() ? loadCode(matches[0]) : addStock(q); } }}
+              placeholder="Cari kode saham IDX (BBRI, ANTM, GOTO…)"
               style={{ width: "100%", padding: "9px 12px 9px 34px", borderRadius: 12, border: `1px solid ${T.border}`, background: "#fff", fontSize: 14, outline: "none", color: T.text }} />
-            {matches.length > 0 && (
+            {q.trim().length > 0 && (
               <div style={{ position: "absolute", top: 44, left: 0, right: 0, background: "#fff", borderRadius: 12, border: `1px solid ${T.border}`, boxShadow: T.shadow, overflow: "hidden", zIndex: 30 }}>
                 {matches.map((c) => (
                   <div key={c} onClick={() => loadCode(c)} style={{ padding: "10px 14px", cursor: "pointer", display: "flex", justifyContent: "space-between" }}
                     onMouseEnter={(e) => (e.currentTarget.style.background = T.primarySoft)} onMouseLeave={(e) => (e.currentTarget.style.background = "#fff")}>
-                    <b style={{ color: T.primary }}>{c}</b><span style={{ color: T.sub, fontSize: 13 }}>{DEMO[c].name}</span>
+                    <b style={{ color: T.primary }}>{c}</b><span style={{ color: T.sub, fontSize: 13 }}>{DEMO[c].name}{DEMO[c].custom ? " · custom" : ""}</span>
                   </div>))}
+                {!DEMO[q.trim().toUpperCase()] && /^[A-Z0-9]{2,5}$/.test(q.trim().toUpperCase()) && (
+                  <div onClick={() => addStock(q)} style={{ padding: "11px 14px", cursor: "pointer", borderTop: matches.length ? `1px solid ${T.border}` : "none", background: T.primarySoft, display: "flex", alignItems: "center", gap: 8 }}>
+                    {searching ? <RefreshCw size={14} className="spin" color={T.primary} /> : <Search size={14} color={T.primary} />}
+                    <span style={{ fontSize: 13.5, color: T.primary, fontWeight: 700 }}>
+                      {searching ? "Mencari di IDX…" : `Cari "${q.trim().toUpperCase()}" di IDX →`}
+                    </span>
+                  </div>)}
+                {matches.length === 0 && !/^[A-Z0-9]{2,5}$/.test(q.trim().toUpperCase()) && (
+                  <div style={{ padding: "11px 14px", fontSize: 13, color: T.sub }}>Ketik kode saham, mis. ANTM, GOTO, BMRI…</div>
+                )}
               </div>)}
           </div>
         </div>
@@ -598,6 +682,7 @@ export default function App() {
    ============================================================ */
 function Dashboard({ A, data, setData, code }) {
   const { fv, upside, mos, investScore, rec } = A;
+  const incomplete = !isFinite(fv); // saham baru / fundamental belum diisi
   const [edit, setEdit] = useState(false);
   const [editMode, setEditMode] = useState("stockbit"); // "stockbit" (rasio) | "raw"
   const set = (k, v) => setData((d) => {
@@ -632,18 +717,52 @@ function Dashboard({ A, data, setData, code }) {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 18, alignItems: "center" }}>
           <div>
             <div style={{ fontSize: 12, color: T.sub, fontWeight: 600 }}>INVESTMENT SCORE</div>
-            <div style={{ fontSize: 48, fontWeight: 800, color: rec.color, lineHeight: 1 }}>{investScore}<span style={{ fontSize: 18, color: T.sub }}> /100</span></div>
+            <div style={{ fontSize: 48, fontWeight: 800, color: incomplete ? T.sub : rec.color, lineHeight: 1 }}>{isFinite(investScore) ? investScore : "–"}<span style={{ fontSize: 18, color: T.sub }}> /100</span></div>
             <div style={{ marginTop: 8 }}>
-              <span style={{ background: rec.color, color: "#fff", fontWeight: 800, fontSize: 14, padding: "6px 14px", borderRadius: 999 }}>{rec.label}</span>
-              <span style={{ marginLeft: 8, color: "#F59E0B", fontSize: 16 }}>{"★".repeat(rec.stars)}{"☆".repeat(5 - rec.stars)}</span>
+              {incomplete ? (
+                <span style={{ background: T.sub, color: "#fff", fontWeight: 800, fontSize: 13, padding: "6px 14px", borderRadius: 999 }}>LENGKAPI DATA</span>
+              ) : (<>
+                <span style={{ background: rec.color, color: "#fff", fontWeight: 800, fontSize: 14, padding: "6px 14px", borderRadius: 999 }}>{rec.label}</span>
+                <span style={{ marginLeft: 8, color: "#F59E0B", fontSize: 16 }}>{"★".repeat(rec.stars)}{"☆".repeat(5 - rec.stars)}</span>
+              </>)}
             </div>
           </div>
           <Stat label="Intrinsic / Fair Value" value={isFinite(fv) ? rp(fv) : "–"} sub="Weighted 6-model" />
           <Stat label="Harga Sekarang" value={rp(data.price)} />
-          <Stat label={upside >= 0 ? "Upside" : "Downside"} value={pct(upside)} color={upside >= 0 ? T.success : T.danger}
-            sub={`Margin of Safety ${pct(mos)}`} />
+          <Stat label={upside >= 0 ? "Upside" : "Downside"} value={isFinite(upside) ? pct(upside) : "–"} color={!isFinite(upside) ? T.sub : upside >= 0 ? T.success : T.danger}
+            sub={isFinite(mos) ? `Margin of Safety ${pct(mos)}` : "isi fundamental"} />
         </div>
+        {incomplete && (
+          <div style={{ marginTop: 14, padding: "10px 14px", background: "#FEF3C7", borderRadius: 12, fontSize: 13, color: "#92400E", fontWeight: 600 }}>
+            ⚠ Saham ini baru ditambah — harga sudah live, tapi valuasi butuh fundamental. Buka <b>"Edit data"</b> di bawah → mode <b>Dari Stockbit</b> → isi PER, PBV, Div Yield, Growth.
+          </div>)}
       </div>
+
+      {/* AKSI POSISI — cut loss / take profit berdasarkan harga beli kamu */}
+      {(() => {
+        const buy = data.buyPrice || 0;
+        const plPct = buy > 0 ? ((data.price - buy) / buy) * 100 : null;
+        const act = positionAction(upside, investScore, plPct);
+        return (
+          <div style={card({ marginBottom: 16, borderLeft: `4px solid ${act.color}` })}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 200 }}>
+                <div style={{ fontSize: 12, color: T.sub, fontWeight: 700 }}>AKSI POSISI</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 5 }}>
+                  <span style={{ background: act.color, color: "#fff", fontWeight: 800, fontSize: 16, padding: "6px 16px", borderRadius: 999 }}>{act.label}</span>
+                  {plPct !== null && <span style={{ fontWeight: 800, fontSize: 15, color: plPct >= 0 ? T.success : T.danger }}>{pct(plPct)}</span>}
+                </div>
+                <div style={{ fontSize: 13, color: T.text, marginTop: 9, lineHeight: 1.6 }}>{act.note}</div>
+              </div>
+              <label style={{ fontSize: 12, fontWeight: 600, color: T.text, minWidth: 140 }}>Harga beli kamu
+                <input type="number" defaultValue={buy || ""} placeholder="mis. 4500" onBlur={(e) => set("buyPrice", e.target.value)}
+                  style={{ width: "100%", marginTop: 4, padding: "8px 10px", borderRadius: 10, border: `1px solid ${T.border}`, background: "#fff", fontSize: 14 }} />
+                <span style={{ fontSize: 11, color: T.sub }}>Opsional — buat saran cut loss / take profit</span>
+              </label>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* metrik utama */}
       <Section title="Data Pasar & Fundamental" icon={<LayoutDashboard size={16} color={T.primary} />}
